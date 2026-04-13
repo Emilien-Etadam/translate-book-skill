@@ -7,31 +7,46 @@ translate-book is a Claude Code Skill that translates books (PDF/DOCX/EPUB) into
 ## Structure
 
 - `SKILL.md` — Skill definition, the orchestration logic that Claude Code / OpenClaw follows
-- `scripts/convert.py` — PDF/DOCX/EPUB → Markdown chunks (via Calibre HTMLZ)
+- `scripts/prepare.py` — Deterministic preprocessing entrypoint: conversion routing (`--pdf-engine auto|calibre|marker`, `--preserve-svg auto|always|never`), segment extraction, in-script dedup (`dedup_map.json` when aliases exist), glossary candidate extraction, canonical-only chunking, manifest/config generation, and `pipeline_state.json`
+- `scripts/convert.py` — Importable conversion primitives and standalone conversion CLI
+- `scripts/glossary.py` — Importable glossary candidate extraction and standalone CLI
 - `scripts/manifest.py` — SHA-256 chunk tracking and merge validation
-- `scripts/merge_and_build.py` — Merge translated chunks → HTML/DOCX/EPUB/PDF
-- `scripts/calibre_html_publish.py` — Calibre format conversion wrapper
-- `scripts/template.html`, `scripts/template_ebook.html` — HTML templates
+- `scripts/merge_and_build.py` — Parse `output_chunk*.txt`, expand aliases from `dedup_map.json` when present, validate vs `segments.json`, reinject `skeleton.html`, assemble `book.html`, Calibre → DOCX/EPUB/PDF
+- `scripts/validate_consistency.py` — Build `segments_translated.json` from all `output_chunk*.txt` (with alias expansion when `dedup_map.json` exists) and write `consistency_report.txt` (glossary violations, untranslated segments, empty translations)
 
 ## Testing changes
 
 Test with a small PDF to verify the full pipeline:
 
 ```bash
-python3 scripts/convert.py /path/to/small.pdf --olang zh
+python3 scripts/prepare.py /path/to/small.pdf --olang zh
 # then run translation via the skill
-python3 scripts/merge_and_build.py --temp-dir <name>_temp --title "test"
+python3 scripts/validate_consistency.py --temp-dir <name>_temp --olang zh
+python3 scripts/merge_and_build.py --temp-dir <name>_temp --title "test" --olang zh
 ```
 
-Verify: all output_chunk*.md files exist, manifest validation passes, output formats generate.
+Verify: all `output_chunk*.txt` files exist, consistency report is generated (`No issues found.` or actionable findings), manifest validation passes, output formats generate.
+
+Optional PDF tools:
+
+- Poppler (`pdfinfo`, `pdftotext`) enables heuristic simple/complex PDF detection in `--pdf-engine auto`
+- `marker-pdf` (`marker_single`) enables structured extraction for complex PDFs; if unavailable, auto mode falls back to Calibre with warning
+- `pdf2svg` or `mutool` enables optional SVG extraction/preservation in Marker PDF flow (`--preserve-svg auto|always|never`)
 
 ## Conventions
 
-- Only `chunk*.md` naming — no `page*` legacy support
+- Only `chunk*.txt` / `output_chunk*.txt` naming — no `page*` legacy support
 - SKILL.md frontmatter must stay single-line per field (OpenClaw parser requirement)
 - Script paths in SKILL.md use `{baseDir}` not hardcoded paths
 - Subagent instructions in SKILL.md must be platform-neutral (work on Claude Code, OpenClaw, Codex)
 - README changes must be synced to both README.md and README.zh-CN.md
+- Glossary flow: `prepare.py` writes `glossary_candidates.txt` and `pipeline_state.json`; run one glossary sub-agent only when `glossary_needed=true`; translation sub-agents inject `glossary.json` when present (SKILL.md)
+- Style flow: use `pipeline_state.json` as source of truth; if `style_detection_needed=true`, detect from first chunks via one sub-agent, else use `style` directly; inject the mapped style instruction into translator prompts
+- Consistency flow (optional): run `validate_consistency.py` after merge to inspect glossary consistency and empty/untranslated lines; if issues exist, one correction sub-agent patches only listed `Txxxx` lines, then rerun merge/build
+- PDF routing flow: in `--pdf-engine auto`, classify PDFs via Poppler heuristics (indentation/footnote/header-footer proxies); route simple PDFs to Calibre and complex PDFs to marker when available, else warn and fall back to Calibre
+- SVG flow: never segment text under `<svg>`; preserve referenced `.svg` assets; in Marker PDF flow, optionally extract page SVGs and replace Marker PNG images only when page-level mapping is unambiguous
+- Footnote flow: detect call/body pairs in HTML, annotate linked note segments in `segments.json` via object values (`text`, `footnote_for`), and keep linked pairs in the same `chunk*.txt` (chunk may exceed `--chunk-size` when required)
+- Dedup flow: build `dedup_map.json` after extraction (exact text match after strip + same `footnote_for` context), write only canonical segment ids to chunks, then expand alias translations in merge/consistency stages
 - Publish to both GitHub (`git push`) and ClawHub (`clawhub publish ./ --version <semver>`) on release
 
 ## Do not

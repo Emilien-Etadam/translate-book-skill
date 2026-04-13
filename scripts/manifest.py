@@ -17,20 +17,30 @@ def file_hash(filepath):
     return h.hexdigest()
 
 
-def create_manifest(temp_dir, chunk_files, source_md_path):
+def create_manifest(temp_dir, chunk_files, source_md_path=None, skeleton_path=None):
     """Create manifest.json after splitting.
 
     Args:
         temp_dir: temp directory path
-        chunk_files: list of chunk filenames (e.g. ['chunk0001.md', ...])
-        source_md_path: path to the source input.md
+        chunk_files: list of chunk filenames (e.g. ``chunk0001.txt`` or ``chunk0001.md``)
+        source_md_path: optional file whose SHA-256 is stored as ``source_hash``
+            (e.g. ``segments.json`` or legacy ``input.md``). If omitted, uses
+            ``<temp_dir>/segments.json`` when present, else ``<temp_dir>/input.md``.
+        skeleton_path: optional path to ``skeleton.html``; hash stored as ``skeleton_hash``.
     """
-    source_hash = file_hash(source_md_path) if os.path.exists(source_md_path) else ""
+    if source_md_path is None:
+        seg = os.path.join(temp_dir, "segments.json")
+        legacy = os.path.join(temp_dir, "input.md")
+        source_md_path = seg if os.path.exists(seg) else legacy
+
+    source_hash = file_hash(source_md_path) if source_md_path and os.path.exists(source_md_path) else ""
+    skeleton_hash = (
+        file_hash(skeleton_path) if skeleton_path and os.path.exists(skeleton_path) else ""
+    )
 
     chunks = []
     for order, filename in enumerate(chunk_files, 1):
         filepath = os.path.join(temp_dir, filename)
-        # Derive output filename: chunk0001.md -> output_chunk0001.md
         output_filename = f"output_{filename}"
         chunk_id = os.path.splitext(filename)[0]  # e.g. "chunk0001"
 
@@ -45,6 +55,7 @@ def create_manifest(temp_dir, chunk_files, source_md_path):
     manifest = {
         "chunk_count": len(chunks),
         "source_hash": source_hash,
+        "skeleton_hash": skeleton_hash,
         "chunks": chunks,
     }
 
