@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import convert
 import glossary
+import summarize
 from manifest import create_manifest
 
 SegmentValue = Union[str, Dict[str, str]]
@@ -86,6 +87,9 @@ def _clear_generated_files(temp_dir: str) -> None:
             "dedup_map.json",
             "glossary_candidates.txt",
             "pipeline_state.json",
+            "summary_prompt.txt",
+            "fewshot_prompt.txt",
+            "source_lang.txt",
             "missing_segments.txt",
             "segments_translated.json",
             "consistency_report.txt",
@@ -228,6 +232,15 @@ def _write_pipeline_state(temp_dir: str, state: Dict[str, object]) -> None:
         f.write("\n")
 
 
+def _read_source_lang(temp_dir: str) -> str:
+    path = os.path.join(temp_dir, "source_lang.txt")
+    if not os.path.isfile(path):
+        return "unknown"
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        value = f.read().strip()
+    return value or "unknown"
+
+
 def run_prepare(args: argparse.Namespace) -> int:
     input_file = os.path.abspath(args.input_file)
     if not os.path.isfile(input_file):
@@ -285,6 +298,15 @@ def run_prepare(args: argparse.Namespace) -> int:
         print("Error: aucun chunk généré.", file=sys.stderr)
         return 1
 
+    fewshot_samples_count = args.num_samples if args.num_samples > 0 else 1
+    summary_rc = summarize.run(
+        temp_dir=temp_dir,
+        olang=args.olang,
+        num_samples=fewshot_samples_count,
+    )
+    if summary_rc != 0:
+        return summary_rc
+
     segments_path = os.path.join(temp_dir, "segments.json")
     skeleton_path = os.path.join(temp_dir, "skeleton.html")
     create_manifest(
@@ -305,16 +327,20 @@ def run_prepare(args: argparse.Namespace) -> int:
 
     glossary_candidates_path = os.path.join(temp_dir, "glossary_candidates.txt")
     glossary_candidates_count = _count_glossary_candidates(glossary_candidates_path)
+    source_lang = _read_source_lang(temp_dir)
 
     state = {
         "temp_dir": os.path.abspath(temp_dir),
         "input_file": os.path.basename(input_file),
         "target_lang": args.olang,
+        "source_lang": source_lang,
         "total_chunks": len(chunk_files),
         "total_segments": len(segments),
         "dedup_segments_skipped": alias_count,
         "glossary_candidates_count": glossary_candidates_count,
         "glossary_needed": glossary_candidates_count > 0,
+        "summary_needed": True,
+        "fewshot_samples_count": fewshot_samples_count,
         "style": args.style,
         "style_detection_needed": args.style == "auto",
         "conversion_method": conversion_method,
@@ -357,6 +383,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--min-freq", type=int, default=3, help="Fréquence minimale glossaire")
     parser.add_argument("--max-terms", type=int, default=200, help="Nombre max de termes glossaire")
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=5,
+        help="Nombre de chunks échantillonnés pour résumé/few-shot",
+    )
     args = parser.parse_args(argv)
     return run_prepare(args)
 

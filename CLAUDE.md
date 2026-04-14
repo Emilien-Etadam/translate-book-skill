@@ -7,9 +7,10 @@ translate-book is a Claude Code Skill that translates books (PDF/DOCX/EPUB) into
 ## Structure
 
 - `SKILL.md` — Skill definition, the orchestration logic that Claude Code / OpenClaw follows
-- `scripts/prepare.py` — Deterministic preprocessing entrypoint: conversion routing (`--pdf-engine auto|calibre|marker`, `--preserve-svg auto|always|never`), segment extraction, in-script dedup (`dedup_map.json` when aliases exist), glossary candidate extraction, canonical-only chunking, manifest/config generation, and `pipeline_state.json`
+- `scripts/prepare.py` — Deterministic preprocessing entrypoint: conversion routing (`--pdf-engine auto|calibre|marker`, `--preserve-svg auto|always|never`), segment extraction, in-script dedup (`dedup_map.json` when aliases exist), glossary candidate extraction, canonical-only chunking, summarize prompt generation (`--num-samples`), manifest/config generation, and `pipeline_state.json`
 - `scripts/convert.py` — Importable conversion primitives and standalone conversion CLI
 - `scripts/glossary.py` — Importable glossary candidate extraction and standalone CLI
+- `scripts/summarize.py` — Build `summary_prompt.txt` / `fewshot_prompt.txt`, detect source language, and persist `source_lang.txt`
 - `scripts/manifest.py` — SHA-256 chunk tracking and merge validation
 - `scripts/merge_and_build.py` — Parse `output_chunk*.txt`, expand aliases from `dedup_map.json` when present, validate vs `segments.json`, reinject `skeleton.html`, assemble `book.html`, Calibre → DOCX/EPUB/PDF
 - `scripts/validate_consistency.py` — Build `segments_translated.json` from all `output_chunk*.txt` (with alias expansion when `dedup_map.json` exists) and write `consistency_report.txt` (glossary violations, untranslated segments, empty translations)
@@ -26,6 +27,7 @@ python3 scripts/merge_and_build.py --temp-dir <name>_temp --title "test" --olang
 ```
 
 Verify: all `output_chunk*.txt` files exist, consistency report is generated (`No issues found.` or actionable findings), manifest validation passes, output formats generate.
+Also verify summarize artifacts exist after prepare: `summary_prompt.txt`, `fewshot_prompt.txt`, `source_lang.txt`.
 
 Optional PDF tools:
 
@@ -41,7 +43,10 @@ Optional PDF tools:
 - Subagent instructions in SKILL.md must be platform-neutral (work on Claude Code, OpenClaw, Codex)
 - README changes must be synced to both README.md and README.zh-CN.md
 - Glossary flow: `prepare.py` writes `glossary_candidates.txt` and `pipeline_state.json`; run one glossary sub-agent only when `glossary_needed=true`; translation sub-agents inject `glossary.json` when present (SKILL.md)
+- Summary/few-shot flow: `prepare.py` always runs `summarize.py` to generate `summary_prompt.txt`, `fewshot_prompt.txt`, and `source_lang.txt`; SKILL runs one summary sub-agent (`book_summary.json`) and one few-shot sub-agent (`fewshot_examples.txt`) before style detection
 - Style flow: use `pipeline_state.json` as source of truth; if `style_detection_needed=true`, detect from first chunks via one sub-agent, else use `style` directly; inject the mapped style instruction into translator prompts
+- Translator prompt assembly order: style instruction → formatted book summary (`book_summary.json`) → glossary (optional) → few-shot examples (`fewshot_examples.txt`) → sliding context → chunk to translate
+- Cost note: summary+few-shot usually add ~500-800 tokens per translator sub-agent, but improve coherence and lexical consistency
 - Consistency flow (optional): run `validate_consistency.py` after merge to inspect glossary consistency and empty/untranslated lines; if issues exist, one correction sub-agent patches only listed `Txxxx` lines, then rerun merge/build
 - PDF routing flow: in `--pdf-engine auto`, classify PDFs via Poppler heuristics (indentation/footnote/header-footer proxies); route simple PDFs to Calibre and complex PDFs to marker when available, else warn and fall back to Calibre
 - SVG flow: never segment text under `<svg>`; preserve referenced `.svg` assets; in Marker PDF flow, optionally extract page SVGs and replace Marker PNG images only when page-level mapping is unambiguous

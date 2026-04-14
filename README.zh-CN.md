@@ -19,11 +19,16 @@ prepare.py（确定性预处理）
   │  拆分结构与内容 → skeleton.html + segments.json
   │  内置 dedup → 有别名时写 dedup_map.json
   │  术语候选提取 → glossary_candidates.txt
+  │  摘要/ few-shot 提示生成 → summary_prompt.txt + fewshot_prompt.txt + source_lang.txt
   │  chunk0001.txt, chunk0002.txt, …（仅 canonical 行）
   │  manifest.json 记录各 chunk 文件 hash
   │  pipeline_state.json（给 SKILL.md 的已解析事实契约）
   ▼
 术语表：仅当 pipeline_state.glossary_needed=true 时启动单个 subagent
+  ▼
+图书摘要：固定一个 subagent → book_summary.json
+  ▼
+Few-shot 示例：固定一个 subagent → fewshot_examples.txt
   ▼
 风格检测：仅当 pipeline_state.style_detection_needed=true 时启动单个 subagent
   ▼
@@ -101,7 +106,7 @@ translate /path/to/book.pdf to Chinese --style literary
 /translate-book translate /path/to/book.pdf to Japanese
 ```
 
-Skill 自动处理完整流程 — 转换、分块、术语表（按需）、并行翻译、校验、合并、可选一致性复核、生成所有输出格式。
+Skill 自动处理完整流程 — 转换、分块、术语表（按需）、图书摘要、few-shot 示例、并行翻译、校验、合并、可选一致性复核、生成所有输出格式。
 
 ### 3. 查看输出
 
@@ -119,7 +124,7 @@ Skill 自动处理完整流程 — 转换、分块、术语表（按需）、并
 ### 第一步：准备（单一确定性入口）
 
 ```bash
-python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --pdf-engine auto --preserve-svg auto
+python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --pdf-engine auto --preserve-svg auto --num-samples 5
 ```
 
 `prepare.py` 是默认预处理入口，先在 Python 中解析所有确定性分支，再进入 LLM 阶段。它会完成：
@@ -130,6 +135,7 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 - dedup（同文本 + 同 `footnote_for` 上下文），仅在有别名时写 `dedup_map.json`
 - canonical-only chunk 切分（保持脚注关联）
 - 术语候选提取（`--min-freq`、`--max-terms`）
+- 通过 `summarize.py` 生成摘要/few-shot 提示（`--num-samples`，默认 5）
 - 生成 manifest/config，以及 `pipeline_state.json`
 
 `pipeline_state.json` 包含已解析事实，例如：
@@ -137,6 +143,7 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 - `temp_dir`、`input_file`、`target_lang`
 - `total_chunks`、`total_segments`、`dedup_segments_skipped`
 - `glossary_candidates_count`、`glossary_needed`
+- `source_lang`、`summary_needed`、`fewshot_samples_count`
 - `style`、`style_detection_needed`
 - `conversion_method`、`svg_extracted`
 - `footnote_pairs`、`chunks_with_footnotes`
@@ -177,7 +184,20 @@ PDF 相关行为保持不变：
 - 若 `glossary_needed=true`，启动一个术语表 subagent 生成 `glossary.json`
 - 否则跳过
 
-### 第三步：风格检测（简单条件）
+### 第三步：图书摘要（固定执行）
+
+- 读取 `summary_prompt.txt`
+- 启动一个 subagent
+- 将结构化输出写入 `book_summary.json`
+
+### 第四步：Few-shot 示例（固定执行）
+
+- 读取 `fewshot_prompt.txt`
+- 将占位符 `[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]` 替换为真实 `book_summary.json` 内容
+- 启动一个 subagent
+- 输出写入 `fewshot_examples.txt`
+
+### 第五步：风格检测（简单条件）
 
 读取 `pipeline_state.json`：
 
@@ -195,17 +215,22 @@ PDF 相关行为保持不变：
 - `technical`：技术型精确表达，强调清晰与术语准确
 - `conversational`：自然口语化、接近日常对话
 
-### 第四步：翻译（并行 subagent）
+### 第六步：翻译（并行 subagent）
 
-Skill 分批启动 subagent（默认 8 路并发）。每个 subagent：
+Skill 分批启动 subagent（默认 8 路并发）。每个 subagent 的提示按以下顺序组装：
 
-1. 读取一个源 chunk（如 `chunk0042.txt`）
-2. 将每一行段翻译为目标语言
-3. 将结果写入 `output_chunk0042.txt`（行数与 `Txxxx:` 前缀与源文件一致）
+1. 风格指令（解析后的 style）
+2. `book_summary.json` 的 2-3 行摘要（你在翻译一部 [genre]、主题是 [subject]、语气 [tone]、并附整体简介）
+3. 术语表（仅在 `glossary.json` 存在时注入）
+4. `fewshot_examples.txt` 示例
+5. 滑动上下文（前/后）
+6. 待翻译 chunk
 
 如果运行中断，重新运行会跳过已有合法输出的 chunk。翻译失败的 chunk 会自动重试一次。
 
-### 第五步：合并与构建
+摘要 + few-shot 通常会为每个翻译 subagent 增加约 500-800 tokens。该边际成本会随 chunk 数增长，但对全书一致性与词汇选择准确性有明显提升。
+
+### 第七步：合并与构建
 
 ```bash
 python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名》" --olang zh
@@ -219,7 +244,7 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 - 替换 `skeleton.html` 中的占位符并写出 **`book.html`**
 - 调用 Calibre `ebook-convert` 生成 **`book.epub`**、**`book.docx`**、**`book.pdf`**（含 SVG 友好 CSS；EPUB 额外使用 `--preserve-cover-aspect-ratio` 与 `--no-svg-cover`）
 
-### 第六步：可选一致性后校验
+### 第八步：可选一致性后校验
 
 ```bash
 python3 scripts/validate_consistency.py --temp-dir book_temp --olang zh
@@ -248,6 +273,7 @@ No issues found.
 |-------------|------|
 | `SKILL.md` | Claude Code Skill 定义 — 编排完整流程 |
 | `scripts/prepare.py` | 单一确定性预处理入口（转换、dedup、术语候选、chunk、manifest、`pipeline_state.json`） |
+| `scripts/summarize.py` | 基于 chunk 生成摘要/few-shot 提示，并检测源语言 |
 | `scripts/convert.py` | 可导入转换原语与独立转换 CLI |
 | `scripts/glossary.py` | 可导入术语候选提取与独立 CLI |
 | `scripts/manifest.py` | Chunk manifest：SHA-256 追踪与合并前校验 |
@@ -262,6 +288,11 @@ No issues found.
 | `{name}_temp/chunk*.txt` | 供 subagent 翻译的 canonical 源行文件（关联脚注时可能包含以 `#` 开头的上下文注释） |
 | `{name}_temp/glossary_candidates.txt` | 供术语表 subagent 的启发式候选列表（可为空） |
 | `{name}_temp/glossary.json` | 可选的扁平术语映射，用于翻译提示（仅在有候选时生成） |
+| `{name}_temp/source_lang.txt` | 在摘要提示准备阶段检测得到的源语言 |
+| `{name}_temp/summary_prompt.txt` | 用于摘要 subagent 的提示 |
+| `{name}_temp/book_summary.json` | 摘要 subagent 产出的结构化图书摘要 |
+| `{name}_temp/fewshot_prompt.txt` | few-shot 示例生成提示模板 |
+| `{name}_temp/fewshot_examples.txt` | 注入翻译 subagent 的 few-shot 示例 |
 | `{name}_temp/output_chunk*.txt` | subagent 写回的译后行文件 |
 | `{name}_temp/segments_translated.json` | 从 output chunk 重建的完整译文段映射 |
 | `{name}_temp/consistency_report.txt` | 可选后校验报告（无问题时为 `No issues found.`） |

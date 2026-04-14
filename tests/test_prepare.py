@@ -44,6 +44,9 @@ class PreparePipelineTests(unittest.TestCase):
         )
         self.assertEqual(state["input_file"], "book.html")
         self.assertEqual(state["target_lang"], "zh")
+        self.assertIn("source_lang", state)
+        self.assertTrue(state["summary_needed"])
+        self.assertEqual(state["fewshot_samples_count"], 5)
         self.assertEqual(state["total_segments"], 1)
         self.assertEqual(state["total_chunks"], 1)
         self.assertEqual(state["style"], "auto")
@@ -51,6 +54,8 @@ class PreparePipelineTests(unittest.TestCase):
         self.assertEqual(state["conversion_method"], "html_segments")
         self.assertTrue((temp_dir / "manifest.json").is_file())
         self.assertTrue((temp_dir / "chunk0001.txt").is_file())
+        self.assertTrue((temp_dir / "summary_prompt.txt").is_file())
+        self.assertTrue((temp_dir / "fewshot_prompt.txt").is_file())
 
     def test_dedup_produces_map_and_chunks_only_canonical(self):
         temp_dir, state = self._run_prepare(
@@ -106,6 +111,17 @@ class PreparePipelineTests(unittest.TestCase):
         )
         self.assertEqual(state["style"], "formal")
         self.assertFalse(state["style_detection_needed"])
+
+    def test_prepare_generates_summary_artifacts_and_state_fields(self):
+        temp_dir, state = self._run_prepare(
+            "<html><body><p>Hello world.</p><p>This is a second paragraph.</p></body></html>",
+            extra_args=["--num-samples", "3"],
+        )
+        self.assertEqual(state["fewshot_samples_count"], 3)
+        self.assertIn("source_lang", state)
+        self.assertTrue(state["summary_needed"])
+        self.assertTrue((temp_dir / "summary_prompt.txt").is_file())
+        self.assertTrue((temp_dir / "fewshot_prompt.txt").is_file())
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ Récupérer depuis la demande utilisateur :
 - `chunk_size` (défaut `6000`)
 - `pdf_engine` (`auto|calibre|marker`, défaut `auto`)
 - `preserve_svg` (`auto|always|never`, défaut `auto`)
+- `num_samples` (défaut `5`)
 - `concurrency` (défaut `8`)
 - `custom_instructions` (optionnel)
 
@@ -26,7 +27,7 @@ Récupérer depuis la demande utilisateur :
 Exécuter :
 
 ```bash
-python3 {baseDir}/scripts/prepare.py "<file_path>" --olang "<target_lang>" --chunk-size <chunk_size> --style "<style>" --pdf-engine "<pdf_engine>" --preserve-svg "<preserve_svg>"
+python3 {baseDir}/scripts/prepare.py "<file_path>" --olang "<target_lang>" --chunk-size <chunk_size> --style "<style>" --pdf-engine "<pdf_engine>" --preserve-svg "<preserve_svg>" --num-samples <num_samples>
 ```
 
 Déduire le temp dir attendu : `<dirname(file_path)>/<basename_sans_extension>_temp`.
@@ -52,7 +53,29 @@ Format de sortie : JSON strict, objet plat {"source": "cible"}. Aucun autre text
 Si un nom propre n'a pas de traduction conventionnelle dans la langue cible, le conserver tel quel.
 ```
 
-## 4) Style (condition simple)
+## 4) Résumé du livre (systématique)
+
+Lire `<temp_dir>/summary_prompt.txt`.
+
+Lancer un seul sub-agent avec son contenu.
+
+Le sub-agent retourne un résumé structuré (GENRE/SUJET/TON/ÉPOQUE/PERSONNAGES/RÉSUMÉ) et l’orchestrateur écrit la réponse dans `<temp_dir>/book_summary.json`.
+
+## 5) Exemples few-shot (systématique)
+
+Lire `<temp_dir>/fewshot_prompt.txt`.
+
+Remplacer le placeholder :
+
+`[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]`
+
+par le contenu réel de `<temp_dir>/book_summary.json`.
+
+Lancer un seul sub-agent avec le prompt final.
+
+L’orchestrateur écrit la réponse dans `<temp_dir>/fewshot_examples.txt`.
+
+## 6) Style (condition simple)
 
 Si `pipeline_state.json.style_detection_needed == true` :
 - lire `chunk0001.txt`, `chunk0002.txt`, `chunk0003.txt` quand présents
@@ -68,19 +91,26 @@ Prompt détection style :
 Lis ces extraits d'un livre. Détermine le registre stylistique dominant. Réponds par un seul mot : formal, literary, technical, ou conversational. Aucun autre texte.
 ```
 
-## 5) Traduction parallèle
+## 7) Traduction parallèle
 
 Lire `pipeline_state.json.total_chunks`.
 
 Traduire `chunk0001.txt` à `chunkNNNN.txt` par batchs de `concurrency` (défaut 8), un sub-agent par chunk.
 
 Pour chaque sub-agent :
-- inclure instruction de registre (style résolu à l’étape 4)
-- injecter `glossary.json` uniquement s’il existe
+- assembler le message utilisateur dans cet ordre :
+  1) instruction de registre (style résolu à l’étape 6)
+  2) résumé du livre (`book_summary.json`) formaté en 2-3 lignes: `Tu traduis un [genre] sur [sujet]. Ton : [ton]. [résumé].`
+  3) glossaire (`glossary.json`) uniquement s’il existe
+  4) exemples few-shot (`fewshot_examples.txt`)
+  5) contexte glissant (avant/après)
+  6) chunk à traduire
 - inclure contexte glissant : 5 lignes avant / 5 lignes après
 - traduire uniquement `[CHUNK À TRADUIRE]`
 - écrire `output_chunkNNNN.txt`
 - valider : même nombre de lignes `Txxxx:` et mêmes ids, même ordre
+
+Note coût: résumé + few-shot ajoutent en général ~500-800 tokens par sub-agent (coût marginal multiplié par le nombre de chunks), avec un impact significatif sur la cohérence globale et la justesse des choix lexicaux.
 
 Prompt système traducteur (remplacer `{LANG}` et `{STYLE_INSTRUCTION}`) :
 
@@ -104,7 +134,7 @@ Mapping style :
 - `technical` → `Traduis dans un registre technique précis. Privilégie la clarté et l'exactitude terminologique.`
 - `conversational` → `Traduis dans un registre courant et naturel, comme une conversation orale.`
 
-## 6) Post-traitement (commandes uniques)
+## 8) Post-traitement (commandes uniques)
 
 Exécuter :
 
@@ -118,7 +148,7 @@ Puis :
 python3 {baseDir}/scripts/validate_consistency.py --temp-dir "<temp_dir>" --olang "<target_lang>"
 ```
 
-## 7) Correction de cohérence (condition simple)
+## 9) Correction de cohérence (condition simple)
 
 Si `consistency_report.txt` contient des problèmes :
 - lancer un seul sub-agent de correction ciblée (`Txxxx` listés seulement)
