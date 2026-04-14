@@ -108,6 +108,40 @@ class PromptGenerationTests(unittest.TestCase):
             self.assertNotIn("Segment 1: court", fewshot)
             self.assertNotIn("Segment 1: mini", fewshot)
 
+    def test_summary_off_and_fewshot_off_remove_prompt_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            temp_dir = Path(d)
+            (temp_dir / "segments.json").write_text(
+                json.dumps({"T0001": "x"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (temp_dir / "chunk1.txt").write_text("T0001: extrait_1\n", encoding="utf-8")
+            (temp_dir / "summary_prompt.txt").write_text("old", encoding="utf-8")
+            (temp_dir / "fewshot_prompt.txt").write_text("old", encoding="utf-8")
+
+            rc = summarize.run(str(temp_dir), "fr", 3, summary_mode="off", generate_fewshot=False)
+            self.assertEqual(rc, 0)
+            self.assertFalse((temp_dir / "summary_prompt.txt").exists())
+            self.assertFalse((temp_dir / "fewshot_prompt.txt").exists())
+            self.assertTrue((temp_dir / "source_lang.txt").is_file())
+
+    def test_mini_summary_generates_compact_prompt(self):
+        with tempfile.TemporaryDirectory() as d:
+            temp_dir = Path(d)
+            (temp_dir / "segments.json").write_text(
+                json.dumps({"T0001": "the and of"}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (temp_dir / "chunk1.txt").write_text("T0001: extrait_1\n", encoding="utf-8")
+
+            rc = summarize.run(str(temp_dir), "fr", 2, summary_mode="mini", generate_fewshot=False)
+            self.assertEqual(rc, 0)
+            prompt = (temp_dir / "summary_prompt.txt").read_text(encoding="utf-8")
+            self.assertIn("mini-résumé très compact", prompt)
+            self.assertIn("THEME:", prompt)
+            self.assertIn("TON:", prompt)
+            self.assertFalse((temp_dir / "fewshot_prompt.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

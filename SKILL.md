@@ -16,10 +16,16 @@ Récupérer depuis la demande utilisateur :
 - `target_lang` (défaut `zh`)
 - `style` (`formal|literary|technical|conversational|auto`, défaut `auto`)
 - `chunk_size` (défaut `6000`)
+- `llm_profile` (`full|local-lite`, défaut `full`)
 - `pdf_engine` (`auto|calibre|marker`, défaut `auto`)
 - `preserve_svg` (`auto|always|never`, défaut `auto`)
 - `num_samples` (défaut `5`)
-- `concurrency` (défaut `8`)
+- `concurrency` (optionnel, sinon `pipeline_state.json.recommended_concurrency`)
+- `summary_mode` (`auto|off|mini|full`, optionnel)
+- `fewshot` (`auto|on|off`, optionnel)
+- `style_detection` (`auto|on|off`, optionnel)
+- `consistency_post_validation` (`auto|on|off`, optionnel)
+- `sliding_context_lines` (optionnel, sinon `pipeline_state` fixe les valeurs)
 - `custom_instructions` (optionnel)
 
 ## 2) Préparation déterministe (commande unique)
@@ -27,7 +33,7 @@ Récupérer depuis la demande utilisateur :
 Exécuter :
 
 ```bash
-python3 {baseDir}/scripts/prepare.py "<file_path>" --olang "<target_lang>" --chunk-size <chunk_size> --style "<style>" --pdf-engine "<pdf_engine>" --preserve-svg "<preserve_svg>" --num-samples <num_samples>
+python3 {baseDir}/scripts/prepare.py "<file_path>" --olang "<target_lang>" --chunk-size <chunk_size> --style "<style>" --llm-profile "<llm_profile>" --pdf-engine "<pdf_engine>" --preserve-svg "<preserve_svg>" --num-samples <num_samples>
 ```
 
 Déduire le temp dir attendu : `<dirname(file_path)>/<basename_sans_extension>_temp`.
@@ -54,27 +60,27 @@ Format de sortie : JSON strict, objet plat {"source": "cible"}. Aucun autre text
 Si un nom propre n'a pas de traduction conventionnelle dans la langue cible, le conserver tel quel.
 ```
 
-## 4) Résumé du livre (systématique)
+## 4) Résumé du livre (condition simple)
 
-Lire `<temp_dir>/summary_prompt.txt`.
+Si `pipeline_state.json.summary_needed == true` :
+- lire `<temp_dir>/summary_prompt.txt`
+- lancer un seul sub-agent avec son contenu
+- si `pipeline_state.json.summary_mode == "mini"` : demander une sortie ultra-courte (2 phrases max)
+- écrire la réponse dans `<temp_dir>/book_summary.json`
 
-Lancer un seul sub-agent avec son contenu.
+Sinon : passer.
 
-Le sub-agent retourne un résumé structuré (GENRE/SUJET/TON/ÉPOQUE/PERSONNAGES/RÉSUMÉ) et l’orchestrateur écrit la réponse dans `<temp_dir>/book_summary.json`.
+## 5) Exemples few-shot (condition simple)
 
-## 5) Exemples few-shot (systématique)
+Si `pipeline_state.json.fewshot_enabled == true` :
+- lire `<temp_dir>/fewshot_prompt.txt`
+- si `book_summary.json` existe, remplacer le placeholder :
+  `[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]`
+  par le contenu réel de `<temp_dir>/book_summary.json`
+- lancer un seul sub-agent avec le prompt final
+- écrire la réponse dans `<temp_dir>/fewshot_examples.txt`
 
-Lire `<temp_dir>/fewshot_prompt.txt`.
-
-Remplacer le placeholder :
-
-`[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]`
-
-par le contenu réel de `<temp_dir>/book_summary.json`.
-
-Lancer un seul sub-agent avec le prompt final.
-
-L’orchestrateur écrit la réponse dans `<temp_dir>/fewshot_examples.txt`.
+Sinon : passer.
 
 ## 6) Style (condition simple)
 
@@ -96,17 +102,21 @@ Lis ces extraits d'un livre. Détermine le registre stylistique dominant. Répon
 
 Lire `pipeline_state.json.total_chunks`.
 
-Traduire `chunk0001.txt` à `chunkNNNN.txt` par batchs de `concurrency` (défaut 8), un sub-agent par chunk.
+Déterminer la concurrence effective :
+- si l’utilisateur fournit `concurrency`, l’utiliser
+- sinon utiliser `pipeline_state.json.recommended_concurrency`
+
+Traduire `chunk0001.txt` à `chunkNNNN.txt` par batchs de cette concurrence, un sub-agent par chunk.
 
 Pour chaque sub-agent :
 - assembler le message utilisateur dans cet ordre :
   1) instruction de registre (style résolu à l’étape 6)
-  2) résumé du livre (`book_summary.json`) formaté en 2-3 lignes: `Tu traduis un [genre] sur [sujet]. Ton : [ton]. [résumé].`
+  2) résumé du livre (`book_summary.json`) seulement si `summary_needed=true`
   3) glossaire (`glossary.json`) uniquement s’il existe
-  4) exemples few-shot (`fewshot_examples.txt`)
-  5) contexte glissant (avant/après)
+  4) exemples few-shot (`fewshot_examples.txt`) seulement si `fewshot_enabled=true`
+  5) contexte glissant (avant/après) selon `pipeline_state.json.sliding_context_before_lines` et `pipeline_state.json.sliding_context_after_lines`
   6) chunk à traduire
-- inclure contexte glissant : 5 lignes avant / 5 lignes après
+- en mode `local-lite`, privilégier prompts courts et éviter toute section désactivée
 - traduire uniquement `[CHUNK À TRADUIRE]`
 - écrire `output_chunkNNNN.txt`
 - valider : même nombre de lignes `Txxxx:` et mêmes ids, même ordre
@@ -115,6 +125,17 @@ Note coût: résumé + few-shot ajoutent en général ~500-800 tokens par sub-ag
 
 Prompt système traducteur (remplacer `{LANG}` et `{STYLE_INSTRUCTION}`) :
 
+```
+
+Si `pipeline_state.json.translator_prompt_mode == "compact"` (profil local-lite), utiliser cette variante plus courte :
+
+```
+Traduis les segments vers {LANG}. Garde strictement chaque préfixe Txxxx:.
+Ne traduis pas les lignes de contexte ni les lignes commençant par #.
+Ne fusionne/supprime/réordonne aucune ligne. Même ids, même ordre, même nombre de lignes.
+Conserve littéralement \n \r \\.
+Si un glossaire est fourni, applique-le.
+Sortie: uniquement des lignes Txxxx:...
 ```
 Segments numérotés d'un livre. Traduis chaque segment vers {LANG}.
 Si un glossaire est fourni dans le message utilisateur, applique-le strictement.
@@ -148,6 +169,8 @@ Puis :
 ```bash
 python3 {baseDir}/scripts/validate_consistency.py --temp-dir "<temp_dir>" --olang "<target_lang>"
 ```
+
+N’exécuter la commande de validation de cohérence que si `pipeline_state.json.consistency_post_validation_enabled == true`, ou si l’utilisateur le demande explicitement.
 
 ## 9) Correction de cohérence (condition simple)
 

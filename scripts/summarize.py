@@ -214,6 +214,31 @@ def build_summary_prompt(sampled_excerpts):
     return "\n".join(lines).rstrip() + "\n"
 
 
+def build_mini_summary_prompt(sampled_excerpts):
+    lines = []
+    lines.append(
+        "Tu reçois de courts extraits d'un livre. Produis un mini-résumé très compact en 2 phrases maximum."
+    )
+    lines.append(
+        "Format strict: THEME: <1 phrase courte> puis TON: <1 mot parmi formal|literary|technical|conversational>."
+    )
+    lines.append("Aucun autre texte.")
+    lines.append("")
+
+    total = len(sampled_excerpts)
+    for pos, excerpt in enumerate(sampled_excerpts, start=1):
+        if pos == 1:
+            header = f"--- EXTRAIT {pos} (début du livre) ---"
+        elif pos == total:
+            header = f"--- EXTRAIT {pos} (fin du livre) ---"
+        else:
+            header = f"--- EXTRAIT {pos} ---"
+        lines.append(header)
+        lines.append(excerpt if excerpt else "(vide)")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def build_fewshot_prompt(source_lang, olang, fewshot_segments):
     lines = []
     lines.append(
@@ -247,7 +272,15 @@ def build_fewshot_prompt(source_lang, olang, fewshot_segments):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def run(temp_dir, olang, num_samples):
+def _safe_remove(path):
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def run(temp_dir, olang, num_samples, summary_mode="full", generate_fewshot=True):
     if not os.path.isdir(temp_dir):
         print(f"Erreur : répertoire introuvable : {temp_dir}")
         return 1
@@ -266,35 +299,49 @@ def run(temp_dir, olang, num_samples):
         probe = handle.read(500)
     source_lang = detect_source_language(probe)
 
-    selected_indices = select_uniform_indices(len(chunk_paths), num_samples)
+    selected_indices = select_uniform_indices(len(chunk_paths), num_samples if num_samples > 0 else 1)
     sampled_excerpts = []
     sampled_segments = []
 
-    for idx in selected_indices:
-        segments = parse_chunk_file(chunk_paths[idx])
-        sampled_segments.extend(segments)
-        sampled_excerpts.append(build_chunk_excerpt(segments))
+    if summary_mode != "off" or generate_fewshot:
+        for idx in selected_indices:
+            segments = parse_chunk_file(chunk_paths[idx])
+            sampled_segments.extend(segments)
+            sampled_excerpts.append(build_chunk_excerpt(segments))
 
     fewshot_segments = select_longest_segments(sampled_segments, 3)
-
-    summary_prompt = build_summary_prompt(sampled_excerpts)
-    fewshot_prompt = build_fewshot_prompt(source_lang, olang, fewshot_segments)
 
     summary_prompt_path = os.path.join(temp_dir, "summary_prompt.txt")
     fewshot_prompt_path = os.path.join(temp_dir, "fewshot_prompt.txt")
     source_lang_path = os.path.join(temp_dir, "source_lang.txt")
 
-    with open(summary_prompt_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(summary_prompt)
-    with open(fewshot_prompt_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(fewshot_prompt)
+    if summary_mode == "full":
+        summary_prompt = build_summary_prompt(sampled_excerpts)
+        with open(summary_prompt_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(summary_prompt)
+    elif summary_mode == "mini":
+        summary_prompt = build_mini_summary_prompt(sampled_excerpts)
+        with open(summary_prompt_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(summary_prompt)
+    else:
+        _safe_remove(summary_prompt_path)
+
+    if generate_fewshot:
+        fewshot_prompt = build_fewshot_prompt(source_lang, olang, fewshot_segments)
+        with open(fewshot_prompt_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(fewshot_prompt)
+    else:
+        _safe_remove(fewshot_prompt_path)
+
     with open(source_lang_path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(source_lang + "\n")
 
-    print(f"Chunks échantillonnés : {len(selected_indices)}")
-    print(f"Indices sélectionnés : {selected_indices}")
+    print(f"Chunks échantillonnés : {len(selected_indices) if (summary_mode != 'off' or generate_fewshot) else 0}")
+    print(f"Indices sélectionnés : {selected_indices if (summary_mode != 'off' or generate_fewshot) else []}")
     print(f"Langue source détectée : {source_lang}")
-    print(f"Segments few-shot sélectionnés : {len(fewshot_segments)}")
+    print(f"Mode résumé : {summary_mode}")
+    print(f"Few-shot activé : {generate_fewshot}")
+    print(f"Segments few-shot sélectionnés : {len(fewshot_segments) if generate_fewshot else 0}")
     return 0
 
 
@@ -310,10 +357,28 @@ def main(argv=None):
         default=5,
         help="Nombre de chunks échantillonnés pour le résumé",
     )
+    parser.add_argument(
+        "--summary-mode",
+        default="full",
+        choices=["off", "mini", "full"],
+        help="Mode de génération du résumé",
+    )
+    parser.add_argument(
+        "--fewshot",
+        default="on",
+        choices=["on", "off"],
+        help="Activer la génération du prompt few-shot",
+    )
     args = parser.parse_args(argv)
 
     samples = args.num_samples if args.num_samples > 0 else 1
-    return run(args.temp_dir, args.olang, samples)
+    return run(
+        args.temp_dir,
+        args.olang,
+        samples,
+        summary_mode=args.summary_mode,
+        generate_fewshot=args.fewshot == "on",
+    )
 
 
 if __name__ == "__main__":

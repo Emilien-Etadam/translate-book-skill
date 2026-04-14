@@ -26,13 +26,13 @@ prepare.py (deterministic preprocessing)
   ▼
 Glossary: optional one subagent (only if pipeline_state.glossary_needed)
   ▼
-Book summary: one subagent (always) → book_summary.json
+Book summary: conditional (pipeline_state.summary_needed) → book_summary.json
   ▼
-Few-shot examples: one subagent (always) → fewshot_examples.txt
+Few-shot examples: conditional (pipeline_state.fewshot_enabled) → fewshot_examples.txt
   ▼
 Style detection: optional one subagent (only if pipeline_state.style_detection_needed)
   ▼
-Parallel subagents (8 concurrent by default)
+Parallel subagents (configurable, profile-driven)
   │  each subagent: glossary injected if present → read 1 chunk*.txt → translate → output_chunk*.txt
   │  batched to respect API rate limits
   ▼
@@ -53,7 +53,7 @@ Each chunk gets its own independent subagent with a fresh context window. This p
 
 ## Features
 
-- **Parallel subagents** — 8 concurrent translators per batch, each with isolated context
+- **Parallel subagents** — profile-driven concurrency (full: 8 default, local-lite: 1 default), each with isolated context
 - **Resumable** — chunk-level resume; already-translated chunks are skipped on re-run (for metadata or asset changes, use a fresh run)
 - **Manifest validation** — SHA-256 hash tracking on source chunk files prevents stale outputs from being trusted before merge
 - **Multi-format output** — `book.html`, DOCX, EPUB, PDF via Calibre
@@ -106,7 +106,7 @@ Or use the slash command:
 /translate-book translate /path/to/book.pdf to Japanese
 ```
 
-The skill handles the full pipeline automatically — convert, chunk, glossary (when needed), book summary, few-shot examples, parallel translation, validation, merge, optional consistency post-validation, and output builds.
+The skill handles the full pipeline automatically — convert, chunk, glossary (when needed), optional summary/few-shot/style detection, parallel translation, validation, merge, optional consistency post-validation, and output builds.
 
 ### 3. Find your outputs
 
@@ -124,7 +124,7 @@ All files are in `{book_name}_temp/`:
 ### Step 1: Prepare (single deterministic entrypoint)
 
 ```bash
-python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --pdf-engine auto --preserve-svg auto --num-samples 5
+python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --llm-profile full --pdf-engine auto --preserve-svg auto --num-samples 5
 ```
 
 `prepare.py` is the default orchestration entrypoint for preprocessing. It resolves all deterministic decisions before any LLM step:
@@ -146,6 +146,9 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 - `glossary_candidates_count`, `glossary_needed`
 - `source_lang`, `summary_needed`, `fewshot_samples_count`
 - `style`, `style_detection_needed`
+- `llm_profile`, `summary_mode`, `fewshot_enabled`
+- `recommended_concurrency`, `sliding_context_before_lines`, `sliding_context_after_lines`
+- `consistency_post_validation_enabled`, `translator_prompt_mode`
 - `conversion_method`, `svg_extracted`
 - `footnote_pairs`, `chunks_with_footnotes`
 
@@ -186,18 +189,16 @@ Read `pipeline_state.json`:
 - if `glossary_needed=true`, run one glossary subagent to create `glossary.json`
 - otherwise skip glossary generation entirely
 
-### Step 3: Book Summary (always)
+### Step 3: Book Summary (conditional)
 
-- read `summary_prompt.txt`
-- run one subagent
-- write structured output to `book_summary.json`
+- if `summary_needed=true`, read `summary_prompt.txt`, run one subagent, write `book_summary.json`
+- if `summary_mode=mini`, use a compact 2-sentence summary format
+- if `summary_needed=false`, skip this step
 
-### Step 4: Few-shot Examples (always)
+### Step 4: Few-shot Examples (conditional)
 
-- read `fewshot_prompt.txt`
-- replace placeholder `[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]` with real `book_summary.json` content
-- run one subagent
-- write output to `fewshot_examples.txt`
+- if `fewshot_enabled=true`, read `fewshot_prompt.txt`, optionally inject `book_summary.json`, run one subagent, write `fewshot_examples.txt`
+- if `fewshot_enabled=false`, skip this step
 
 ### Step 5: Style Detection (simple conditional)
 
@@ -219,13 +220,13 @@ Register guidance used by translator prompts:
 
 ### Step 6: Translate (parallel subagents)
 
-The skill launches subagents in batches (default: 8 concurrent). Each subagent prompt is assembled in this order:
+The skill launches subagents in batches (default from `pipeline_state.recommended_concurrency`). Each subagent prompt is assembled in this order:
 
 1. Register instruction (resolved style)
-2. Book summary from `book_summary.json` formatted in 2-3 lines (`You are translating a [genre] about [subject]. Tone: [tone]. [summary].`)
+2. Book summary from `book_summary.json` (only when enabled)
 3. Glossary block (only when `glossary.json` exists)
-4. Few-shot examples from `fewshot_examples.txt`
-5. Sliding context (before/after)
+4. Few-shot examples from `fewshot_examples.txt` (only when enabled)
+5. Sliding context (before/after) using `sliding_context_before_lines` and `sliding_context_after_lines`
 6. Source chunk to translate
 
 Then it writes `output_chunkNNNN.txt` with the same line count and `Txxxx:` prefixes as the source.
@@ -254,7 +255,7 @@ The script:
 python3 scripts/validate_consistency.py --temp-dir book_temp --olang zh
 ```
 
-This detector-only step parses every `output_chunk*.txt`, unescapes payloads, expands aliases from `dedup_map.json` when present, and writes:
+This detector-only step is typically enabled in `full` profile and disabled in `local-lite` profile by default. It parses every `output_chunk*.txt`, unescapes payloads, expands aliases from `dedup_map.json` when present, and writes:
 
 - **`segments_translated.json`** — full `Txxxx -> translated text` map
 - **`consistency_report.txt`** — glossary violations, untranslated segments, and empty translations
@@ -268,6 +269,29 @@ No issues found.
 If issues exist, the orchestrator can run one targeted correction subagent, update only listed `Txxxx` lines in `output_chunk*.txt`, and run `merge_and_build.py` again to rebuild `book.html` and output formats.
 
 This stage is optional and can be disabled when token savings are more important than maximum terminology consistency.
+
+## Local LLM / llama.cpp profile
+
+Use `local-lite` when running on a local 32k-context model (for example Gemma 4 26B A4B IQ4_XS on llama.cpp/llama-server).
+
+Recommended baseline:
+
+- `--llm-profile local-lite`
+- `--chunk-size 3000` to `4500`
+- `--concurrency 1` (or `2` if stable)
+- `--summary-mode off` (or `mini` when coherence drops)
+- `--fewshot off`
+- `--style technical` and `--style-detection off`
+- `--sliding-context-lines 0` (or `1` for difficult narrative continuity)
+- `--consistency-post-validation off`
+
+Example local command:
+
+```bash
+python3 scripts/prepare.py /path/to/book.pdf --olang fr --llm-profile local-lite --chunk-size 3500 --style technical --style-detection off --summary-mode off --fewshot off --sliding-context-lines 0 --concurrency 1 --consistency-post-validation off
+```
+
+Then run the skill using the same effective settings from `pipeline_state.json` for orchestration.
 
 **Note:** `{book_name}_temp/` is a working directory for a single translation run. If you change the title, output language, or image assets, either use a fresh temp directory or delete the existing final artifacts (`book.html`, `book.docx`, `book.epub`, `book.pdf`) before re-running merge.
 

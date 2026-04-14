@@ -26,13 +26,13 @@ prepare.py（确定性预处理）
   ▼
 术语表：仅当 pipeline_state.glossary_needed=true 时启动单个 subagent
   ▼
-图书摘要：固定一个 subagent → book_summary.json
+图书摘要：按条件执行（pipeline_state.summary_needed）→ book_summary.json
   ▼
-Few-shot 示例：固定一个 subagent → fewshot_examples.txt
+Few-shot 示例：按条件执行（pipeline_state.fewshot_enabled）→ fewshot_examples.txt
   ▼
 风格检测：仅当 pipeline_state.style_detection_needed=true 时启动单个 subagent
   ▼
-并行 subagent 翻译（默认 8 路并发）
+并行 subagent 翻译（并发可配置，受 profile 驱动）
   │  每个 subagent：若存在则注入术语表 → 读取 1 个 chunk*.txt → 翻译 → 写入 output_chunk*.txt
   │  分批执行，控制 API 速率
   ▼
@@ -53,7 +53,7 @@ Calibre ebook-convert → book.epub / book.docx / book.pdf
 
 ## 功能特性
 
-- **并行 subagent** — 每批 8 个并发翻译器，各自独立上下文
+- **并行 subagent** — profile 驱动并发（full 默认 8，local-lite 默认 1），各自独立上下文
 - **可续跑** — chunk 级续跑，重新运行时自动跳过已翻译的 chunk（元数据或资源变更建议全新运行）
 - **Manifest 校验** — 对源 chunk 文件做 SHA-256 追踪，避免信任过时输出
 - **多格式输出** — `book.html` 以及经 Calibre 生成的 DOCX、EPUB、PDF
@@ -106,7 +106,7 @@ translate /path/to/book.pdf to Chinese --style literary
 /translate-book translate /path/to/book.pdf to Japanese
 ```
 
-Skill 自动处理完整流程 — 转换、分块、术语表（按需）、图书摘要、few-shot 示例、并行翻译、校验、合并、可选一致性复核、生成所有输出格式。
+Skill 自动处理完整流程 — 转换、分块、术语表（按需）、可选摘要/few-shot/风格检测、并行翻译、校验、合并、可选一致性复核、生成所有输出格式。
 
 ### 3. 查看输出
 
@@ -124,7 +124,7 @@ Skill 自动处理完整流程 — 转换、分块、术语表（按需）、图
 ### 第一步：准备（单一确定性入口）
 
 ```bash
-python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --pdf-engine auto --preserve-svg auto --num-samples 5
+python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --style auto --llm-profile full --pdf-engine auto --preserve-svg auto --num-samples 5
 ```
 
 `prepare.py` 是默认预处理入口，先在 Python 中解析所有确定性分支，再进入 LLM 阶段。它会完成：
@@ -145,6 +145,9 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 - `glossary_candidates_count`、`glossary_needed`
 - `source_lang`、`summary_needed`、`fewshot_samples_count`
 - `style`、`style_detection_needed`
+- `llm_profile`、`summary_mode`、`fewshot_enabled`
+- `recommended_concurrency`、`sliding_context_before_lines`、`sliding_context_after_lines`
+- `consistency_post_validation_enabled`、`translator_prompt_mode`
 - `conversion_method`、`svg_extracted`
 - `footnote_pairs`、`chunks_with_footnotes`
 
@@ -185,18 +188,16 @@ PDF 相关行为：
 - 若 `glossary_needed=true`，启动一个术语表 subagent 生成 `glossary.json`
 - 否则跳过
 
-### 第三步：图书摘要（固定执行）
+### 第三步：图书摘要（条件执行）
 
-- 读取 `summary_prompt.txt`
-- 启动一个 subagent
-- 将结构化输出写入 `book_summary.json`
+- 若 `summary_needed=true`：读取 `summary_prompt.txt`、启动一个 subagent、写入 `book_summary.json`
+- 若 `summary_mode=mini`：使用超短摘要格式（最多 2 句）
+- 若 `summary_needed=false`：跳过
 
-### 第四步：Few-shot 示例（固定执行）
+### 第四步：Few-shot 示例（条件执行）
 
-- 读取 `fewshot_prompt.txt`
-- 将占位符 `[contenu de book_summary.json une fois produit — ce champ est un placeholder, rempli par l'orchestrateur]` 替换为真实 `book_summary.json` 内容
-- 启动一个 subagent
-- 输出写入 `fewshot_examples.txt`
+- 若 `fewshot_enabled=true`：读取 `fewshot_prompt.txt`，可选注入 `book_summary.json`，启动一个 subagent，写入 `fewshot_examples.txt`
+- 若 `fewshot_enabled=false`：跳过
 
 ### 第五步：风格检测（简单条件）
 
@@ -218,13 +219,13 @@ PDF 相关行为：
 
 ### 第六步：翻译（并行 subagent）
 
-Skill 分批启动 subagent（默认 8 路并发）。每个 subagent 的提示按以下顺序组装：
+Skill 分批启动 subagent（默认读取 `pipeline_state.recommended_concurrency`）。每个 subagent 的提示按以下顺序组装：
 
 1. 风格指令（解析后的 style）
-2. `book_summary.json` 的 2-3 行摘要（你在翻译一部 [genre]、主题是 [subject]、语气 [tone]、并附整体简介）
+2. `book_summary.json`（仅在启用时注入）
 3. 术语表（仅在 `glossary.json` 存在时注入）
-4. `fewshot_examples.txt` 示例
-5. 滑动上下文（前/后）
+4. `fewshot_examples.txt`（仅在启用时注入）
+5. 滑动上下文（前/后），由 `sliding_context_before_lines` / `sliding_context_after_lines` 控制
 6. 待翻译 chunk
 
 如果运行中断，重新运行会跳过已有合法输出的 chunk。翻译失败的 chunk 会自动重试一次。
@@ -251,7 +252,7 @@ python3 scripts/merge_and_build.py --temp-dir book_temp --title "《译后书名
 python3 scripts/validate_consistency.py --temp-dir book_temp --olang zh
 ```
 
-该步骤只做检测，不直接修正。它会解析全部 `output_chunk*.txt`（含反转义），若存在 `dedup_map.json` 则补全 alias 译文，然后写出：
+该步骤默认在 `full` profile 启用，在 `local-lite` profile 默认关闭。它只做检测，不直接修正。会解析全部 `output_chunk*.txt`（含反转义），若存在 `dedup_map.json` 则补全 alias 译文，然后写出：
 
 - **`segments_translated.json`** — 完整 `Txxxx -> 译文` 映射
 - **`consistency_report.txt`** — 术语表违规、未翻译段、空译文
@@ -265,6 +266,27 @@ No issues found.
 若存在问题，编排器可启动一个定点修正 subagent，仅回写报告列出的 `Txxxx` 行到 `output_chunk*.txt`，然后再次运行 `merge_and_build.py` 重建 `book.html` 和各格式输出。
 
 此步骤为可选；当更重视 token 成本而非最高一致性质量时，可以关闭。
+
+## Local LLM / llama.cpp profile
+
+当你在本地 32k 上下文模型运行（例如 Gemma 4 26B A4B IQ4_XS + llama.cpp/llama-server）时，推荐使用 `local-lite`。
+
+推荐基线：
+
+- `--llm-profile local-lite`
+- `--chunk-size 3000` 到 `4500`
+- `--concurrency 1`（稳定后可试 `2`）
+- `--summary-mode off`（若连贯性不足可改 `mini`）
+- `--fewshot off`
+- `--style technical` 且 `--style-detection off`
+- `--sliding-context-lines 0`（叙事连续性不足时可设 `1`）
+- `--consistency-post-validation off`
+
+本地示例命令：
+
+```bash
+python3 scripts/prepare.py /path/to/book.pdf --olang fr --llm-profile local-lite --chunk-size 3500 --style technical --style-detection off --summary-mode off --fewshot off --sliding-context-lines 0 --concurrency 1 --consistency-post-validation off
+```
 
 **注意：** `{book_name}_temp/` 是单次翻译运行的工作目录。若修改标题、输出语言或图片资源，建议使用新的 temp 目录，或先删除已有成品（`book.html`、`book.docx`、`book.epub`、`book.pdf`）再重跑合并。
 

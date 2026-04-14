@@ -89,6 +89,8 @@ def _clear_generated_files(temp_dir: str) -> None:
             "pipeline_state.json",
             "summary_prompt.txt",
             "fewshot_prompt.txt",
+            "book_summary.json",
+            "fewshot_examples.txt",
             "source_lang.txt",
             "missing_segments.txt",
             "segments_translated.json",
@@ -241,6 +243,20 @@ def _read_source_lang(temp_dir: str) -> str:
     return value or "unknown"
 
 
+def _resolve_toggle(raw_value: str, profile_default: bool) -> bool:
+    if raw_value == "on":
+        return True
+    if raw_value == "off":
+        return False
+    return profile_default
+
+
+def _resolve_summary_mode(raw_value: str, profile_default: str) -> str:
+    if raw_value == "auto":
+        return profile_default
+    return raw_value
+
+
 def run_prepare(args: argparse.Namespace) -> int:
     input_file = os.path.abspath(args.input_file)
     if not os.path.isfile(input_file):
@@ -298,11 +314,74 @@ def run_prepare(args: argparse.Namespace) -> int:
         print("Error: aucun chunk généré.", file=sys.stderr)
         return 1
 
-    fewshot_samples_count = args.num_samples if args.num_samples > 0 else 1
+    profile = args.llm_profile
+    profile_defaults = {
+        "full": {
+            "summary_mode": "full",
+            "fewshot_enabled": True,
+            "style_detection_default": args.style == "auto",
+            "sliding_context_lines": 5,
+            "concurrency": 8,
+            "consistency_post_validation": True,
+            "fallback_style": "formal",
+            "translator_prompt_mode": "full",
+        },
+        "local-lite": {
+            "summary_mode": "off",
+            "fewshot_enabled": False,
+            "style_detection_default": False,
+            "sliding_context_lines": 0,
+            "concurrency": 1,
+            "consistency_post_validation": False,
+            "fallback_style": "technical",
+            "translator_prompt_mode": "compact",
+        },
+    }[profile]
+
+    summary_mode = _resolve_summary_mode(args.summary_mode, profile_defaults["summary_mode"])
+    fewshot_enabled = _resolve_toggle(args.fewshot, profile_defaults["fewshot_enabled"])
+    style_detection_enabled = _resolve_toggle(
+        args.style_detection,
+        profile_defaults["style_detection_default"],
+    )
+    consistency_post_validation_enabled = _resolve_toggle(
+        args.consistency_post_validation,
+        profile_defaults["consistency_post_validation"],
+    )
+
+    if args.sliding_context_lines >= 0:
+        sliding_context_lines = args.sliding_context_lines
+    else:
+        sliding_context_lines = profile_defaults["sliding_context_lines"]
+    if args.concurrency > 0:
+        recommended_concurrency = args.concurrency
+    else:
+        recommended_concurrency = profile_defaults["concurrency"]
+
+    summary_needed = summary_mode != "off"
+    if summary_mode == "off" and fewshot_enabled:
+        print("Warning: few-shot désactivé car summary_mode=off.")
+        fewshot_enabled = False
+
+    prompt_samples_count = args.num_samples if args.num_samples > 0 else 1
+    fewshot_samples_count = prompt_samples_count
+    if not fewshot_enabled:
+        fewshot_samples_count = 0
+
+    effective_style = args.style
+    if not style_detection_enabled and effective_style == "auto":
+        effective_style = profile_defaults["fallback_style"]
+        print(
+            f"Info: style auto remplacé par '{effective_style}' car style detection est désactivée."
+        )
+
+    resolved_style_for_state = "auto" if style_detection_enabled else effective_style
     summary_rc = summarize.run(
         temp_dir=temp_dir,
         olang=args.olang,
-        num_samples=fewshot_samples_count,
+        num_samples=prompt_samples_count,
+        summary_mode=summary_mode,
+        generate_fewshot=fewshot_enabled,
     )
     if summary_rc != 0:
         return summary_rc
@@ -339,10 +418,18 @@ def run_prepare(args: argparse.Namespace) -> int:
         "dedup_segments_skipped": alias_count,
         "glossary_candidates_count": glossary_candidates_count,
         "glossary_needed": glossary_candidates_count > 0,
-        "summary_needed": True,
+        "llm_profile": profile,
+        "summary_mode": summary_mode,
+        "summary_needed": summary_needed,
+        "fewshot_enabled": fewshot_enabled,
         "fewshot_samples_count": fewshot_samples_count,
-        "style": args.style,
-        "style_detection_needed": args.style == "auto",
+        "style": resolved_style_for_state,
+        "style_detection_needed": style_detection_enabled,
+        "sliding_context_before_lines": sliding_context_lines,
+        "sliding_context_after_lines": sliding_context_lines,
+        "recommended_concurrency": recommended_concurrency,
+        "consistency_post_validation_enabled": consistency_post_validation_enabled,
+        "translator_prompt_mode": profile_defaults["translator_prompt_mode"],
         "conversion_method": conversion_method,
         "svg_extracted": svg_extracted,
         "footnote_pairs": _footnote_pairs_count(segments),
@@ -388,6 +475,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=int,
         default=5,
         help="Nombre de chunks échantillonnés pour résumé/few-shot",
+    )
+    parser.add_argument(
+        "--llm-profile",
+        default="full",
+        choices=["full", "local-lite"],
+        help="Profil LLM pour régler prompts et orchestration",
+    )
+    parser.add_argument(
+        "--summary-mode",
+        default="auto",
+        choices=["auto", "off", "mini", "full"],
+        help="Mode résumé (auto suit le profil)",
+    )
+    parser.add_argument(
+        "--fewshot",
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Active/désactive les few-shot prompts (auto suit le profil)",
+    )
+    parser.add_argument(
+        "--style-detection",
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Active/désactive la détection automatique de style (auto suit le profil)",
+    )
+    parser.add_argument(
+        "--consistency-post-validation",
+        default="auto",
+        choices=["auto", "on", "off"],
+        help="Active/désactive la post-validation de cohérence (auto suit le profil)",
+    )
+    parser.add_argument(
+        "--sliding-context-lines",
+        type=int,
+        default=-1,
+        help="Nombre de lignes de contexte avant/après (valeur négative = défaut profil)",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=0,
+        help="Concurrence recommandée pour la traduction (0 = défaut profil)",
     )
     args = parser.parse_args(argv)
     return run_prepare(args)

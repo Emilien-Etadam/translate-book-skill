@@ -123,6 +123,25 @@ class PreparePipelineTests(unittest.TestCase):
         self.assertTrue((temp_dir / "summary_prompt.txt").is_file())
         self.assertTrue((temp_dir / "fewshot_prompt.txt").is_file())
 
+    def test_local_lite_profile_disables_expensive_prompt_blocks_by_default(self):
+        temp_dir, state = self._run_prepare(
+            "<html><body><p>Hello world.</p><p>This is a second paragraph.</p></body></html>",
+            extra_args=["--llm-profile", "local-lite"],
+        )
+        self.assertEqual(state["llm_profile"], "local-lite")
+        self.assertEqual(state["summary_mode"], "off")
+        self.assertFalse(state["summary_needed"])
+        self.assertFalse(state["fewshot_enabled"])
+        self.assertEqual(state["fewshot_samples_count"], 0)
+        self.assertEqual(state["style"], "technical")
+        self.assertFalse(state["style_detection_needed"])
+        self.assertEqual(state["recommended_concurrency"], 1)
+        self.assertEqual(state["sliding_context_before_lines"], 0)
+        self.assertEqual(state["sliding_context_after_lines"], 0)
+        self.assertFalse(state["consistency_post_validation_enabled"])
+        self.assertFalse((temp_dir / "summary_prompt.txt").exists())
+        self.assertFalse((temp_dir / "fewshot_prompt.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
