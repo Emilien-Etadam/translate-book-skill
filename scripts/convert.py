@@ -284,26 +284,13 @@ def choose_pdf_engine(input_file: str, pdf_engine: str) -> Tuple[str, Optional[s
             )
         return "marker", marker_cmd, "forced"
 
-    result = detect_pdf_structure(input_file)
-    for w in result.warnings:
-        print(w)
+    if marker_cmd:
+        return "marker", marker_cmd, "auto"
     print(
-        f"PDF heuristic classification: {result.classification} "
-        f"(pages={result.pages or 'unknown'}, width={result.page_width_pts or 'unknown'} pts)"
+        "Warning: marker-pdf non installé, utilisation de Calibre pour le PDF. "
+        "Installer marker-pdf est recommandé pour une meilleure extraction."
     )
-    for indicator in result.indicators:
-        print(f"  indicator: {indicator}")
-
-    if result.classification == "complex":
-        if marker_cmd:
-            print("Complex PDF detected — routing extraction to marker_single.")
-            return "marker", marker_cmd, "complex"
-        print(
-            "Warning: PDF complexe détecté mais marker n'est pas installé. "
-            "La qualité d'extraction sera dégradée. Installer marker-pdf pour de meilleurs résultats."
-        )
-        return "calibre", None, "complex"
-    return "calibre", None, "simple"
+    return "calibre", None, "auto"
 
 
 def convert_to_htmlz(input_file: str, htmlz_file: str, calibre_path: str) -> bool:
@@ -1486,7 +1473,7 @@ def main() -> None:
         "--pdf-engine",
         default="auto",
         choices=["auto", "calibre", "marker"],
-        help="PDF extraction engine: auto (heuristic), calibre, marker (default: auto)",
+        help="PDF extraction engine: auto (prefer marker when available), calibre, marker (default: auto)",
     )
     parser.add_argument(
         "--preserve-svg",
@@ -1511,16 +1498,25 @@ def main() -> None:
 
     selected_engine = "calibre"
     marker_cmd = None
-    pdf_classification = "n/a"
+    pdf_routing_mode = "n/a"
     if ext == ".pdf":
         try:
-            selected_engine, marker_cmd, pdf_classification = choose_pdf_engine(
+            selected_engine, marker_cmd, pdf_routing_mode = choose_pdf_engine(
                 input_file,
                 args.pdf_engine,
             )
         except RuntimeError as e:
             print(str(e))
             sys.exit(1)
+        result = detect_pdf_structure(input_file)
+        for w in result.warnings:
+            print(w)
+        print(
+            f"PDF heuristic classification (info only): {result.classification} "
+            f"(pages={result.pages or 'unknown'}, width={result.page_width_pts or 'unknown'} pts)"
+        )
+        for indicator in result.indicators:
+            print(f"  indicator: {indicator}")
     elif args.pdf_engine == "marker":
         print("Warning: --pdf-engine marker is only applicable to PDF input. Using calibre.")
 
@@ -1528,7 +1524,7 @@ def main() -> None:
     print(f"Input file: {input_file}")
     print(f"Chunk cumulative threshold: {args.chunk_size} characters")
     if ext == ".pdf":
-        print(f"PDF classification: {pdf_classification}")
+        print(f"PDF routing mode: {pdf_routing_mode}")
         print(f"Selected PDF engine: {selected_engine}")
 
     calibre_path: Optional[str] = None

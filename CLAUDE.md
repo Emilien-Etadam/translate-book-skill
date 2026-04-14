@@ -31,8 +31,8 @@ Also verify summarize artifacts exist after prepare: `summary_prompt.txt`, `fews
 
 Optional PDF tools:
 
-- Poppler (`pdfinfo`, `pdftotext`) enables heuristic simple/complex PDF detection in `--pdf-engine auto`
-- `marker-pdf` (`marker_single`) enables structured extraction for complex PDFs; if unavailable, auto mode falls back to Calibre with warning
+- Poppler (`pdfinfo`, `pdftotext`) provides informational PDF structure classification logs (does not control routing in auto mode)
+- `marker-pdf` (`marker_single`) enables structured extraction for PDFs; in `--pdf-engine auto`, Marker is preferred whenever available, otherwise auto mode falls back to Calibre with warning
 - `pdf2svg` or `mutool` enables optional SVG extraction/preservation in Marker PDF flow (`--preserve-svg auto|always|never`)
 
 ## Conventions
@@ -48,7 +48,7 @@ Optional PDF tools:
 - Translator prompt assembly order: style instruction → formatted book summary (`book_summary.json`) → glossary (optional) → few-shot examples (`fewshot_examples.txt`) → sliding context → chunk to translate
 - Cost note: summary+few-shot usually add ~500-800 tokens per translator sub-agent, but improve coherence and lexical consistency
 - Consistency flow (optional): run `validate_consistency.py` after merge to inspect glossary consistency and empty/untranslated lines; if issues exist, one correction sub-agent patches only listed `Txxxx` lines, then rerun merge/build
-- PDF routing flow: in `--pdf-engine auto`, classify PDFs via Poppler heuristics (indentation/footnote/header-footer proxies); route simple PDFs to Calibre and complex PDFs to marker when available, else warn and fall back to Calibre
+- PDF routing flow: in `--pdf-engine auto`, route PDFs to Marker when `marker_single` is available, else warn and fall back to Calibre; keep Poppler heuristic classification only for informational logs
 - SVG flow: never segment text under `<svg>`; preserve referenced `.svg` assets; in Marker PDF flow, optionally extract page SVGs and replace Marker PNG images only when page-level mapping is unambiguous
 - Footnote flow: detect call/body pairs in HTML, annotate linked note segments in `segments.json` via object values (`text`, `footnote_for`), and keep linked pairs in the same `chunk*.txt` (chunk may exceed `--chunk-size` when required)
 - Dedup flow: build `dedup_map.json` after extraction (exact text match after strip + same `footnote_for` context), write only canonical segment ids to chunks, then expand alias translations in merge/consistency stages

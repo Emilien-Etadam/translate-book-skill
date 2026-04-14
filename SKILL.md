@@ -36,6 +36,7 @@ Puis lire `<temp_dir>/pipeline_state.json` (le champ `temp_dir` dans ce fichier 
 Important :
 - Ne pas implémenter ici de logique PDF, dedup, SVG, chunking, parsing `config.txt`.
 - Se baser uniquement sur les faits de `pipeline_state.json`.
+- Avec `--pdf-engine auto` sur un PDF, le choix du moteur est déterminé côté Python : Marker est prioritaire quand `marker_single` est disponible, sinon fallback Calibre avec warning.
 
 ## 3) Glossaire (condition simple)
 

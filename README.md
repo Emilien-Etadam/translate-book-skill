@@ -15,7 +15,7 @@ Input (PDF/DOCX/EPUB)
   │
   ▼
 prepare.py (deterministic preprocessing)
-  │  conversion routing (PDF simple/complex, marker/calibre, SVG preserve)
+  │  conversion routing (PDF marker-first auto, marker/calibre, SVG preserve)
   │  split structure vs content → skeleton.html + segments.json
   │  in-script dedup → dedup_map.json when aliases exist
   │  glossary candidate extraction → glossary_candidates.txt
@@ -65,8 +65,8 @@ Each chunk gets its own independent subagent with a fresh context window. This p
 - **Claude Code CLI** — installed and authenticated
 - **Calibre** — `ebook-convert` command must be available ([download](https://calibre-ebook.com/))
 - **Python 3** with **beautifulsoup4** — required for `convert.py` and `merge_and_build.py` (`pip install beautifulsoup4`)
-- **Optional (recommended for PDFs): Poppler** — `pdfinfo` and `pdftotext` enable PDF complexity detection
-- **Optional (recommended for complex PDFs): marker-pdf** — provides `marker_single` for structured PDF extraction
+- **Optional (recommended for PDFs): Poppler** — `pdfinfo` and `pdftotext` provide informational PDF structure classification in logs
+- **Optional (recommended for PDFs): marker-pdf** — provides `marker_single`; with `--pdf-engine auto`, PDFs use Marker by default when available
 - **Optional (recommended for SVG preservation in PDF+Marker): `pdf2svg` or `mutool`** — enables vector extraction before Marker PNG mapping
 
 ## Quick Start
@@ -129,7 +129,7 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 
 `prepare.py` is the default orchestration entrypoint for preprocessing. It resolves all deterministic decisions before any LLM step:
 
-- conversion routing (`--pdf-engine auto|calibre|marker`) and PDF heuristics (simple vs complex)
+- conversion routing (`--pdf-engine auto|calibre|marker`) with Marker-first PDF auto mode
 - optional SVG extraction/preservation (`--preserve-svg auto|always|never`)
 - extraction to `skeleton.html` + `segments.json`
 - dedup grouping (same stripped text + same `footnote_for` context), writing `dedup_map.json` only when aliases exist
@@ -151,16 +151,17 @@ python3 scripts/prepare.py /path/to/book.pdf --olang zh --chunk-size 6000 --styl
 
 `convert.py` remains available as a standalone module/CLI for isolated conversion work, but normal skill flow uses `prepare.py`.
 
-PDF behavior remains:
+PDF behavior:
 
 - For **non-PDF** input, Calibre is used exactly as before.
-- For **PDF + auto**, a lightweight heuristic first analyzes structure using Poppler (`pdfinfo`, `pdftotext -layout` on first pages):
+- For **PDF + auto**, routing no longer depends on heuristics:
+  - if `marker_single` is available, route to Marker,
+  - if `marker_single` is missing, fall back to Calibre with warning:
+    `marker-pdf non installé, utilisation de Calibre pour le PDF. Installer marker-pdf est recommandé pour une meilleure extraction.`
+- After engine selection, a lightweight heuristic still analyzes structure using Poppler (`pdfinfo`, `pdftotext -layout` on first pages) for informational logs only:
   - high ratio of strongly-indented lines (proxy for multi-column layout),
   - recurrent footnote-like short numbered lines near page bottoms,
   - repeated header/footer lines across pages.
-- If no indicator is found, PDF is treated as **simple** and routed to Calibre.
-- If indicators are found, PDF is treated as **complex** and routed to `marker_single` when available.
-- If a complex PDF is detected but `marker_single` is missing, the script falls back to Calibre with an explicit warning.
 - SVG handling:
   - Inline `<svg>...</svg>` content is excluded from segment extraction, so SVG XML/text labels are never replaced by `{{Txxxx}}`.
   - Referenced `.svg` assets are copied as-is under `assets/` and URL-rewritten like other resources.
@@ -312,8 +313,8 @@ This stage is optional and can be disabled when token savings are more important
 | Merge reports missing segment ids | Check `missing_segments.txt` in the temp dir; fix or regenerate the listed `output_chunk*.txt` files |
 | Changed title or assets but outputs did not update | Delete `book.html`, `book.docx`, `book.epub`, `book.pdf` in the temp dir, then re-run `merge_and_build.py` |
 | PDF generation fails | Ensure Calibre is installed with PDF output support |
-| Complex PDF converts poorly | Use `--pdf-engine marker` (or install `marker-pdf` and keep `--pdf-engine auto`) to use structured extraction |
-| `PDF complexe détecté mais marker n'est pas installé` warning | Install `marker-pdf` so `marker_single` is available, or force `--pdf-engine calibre` if you accept lower extraction quality |
+| PDF converts poorly in auto mode | Install `marker-pdf` so `marker_single` is available (auto will prefer Marker), or force `--pdf-engine marker` |
+| `marker-pdf non installé, utilisation de Calibre pour le PDF...` warning | Install `marker-pdf` so auto mode uses Marker for PDF, or force `--pdf-engine calibre` if you accept lower extraction quality |
 | SVGs missing in output | Run with `--pdf-engine marker --preserve-svg auto` and install `pdf2svg` (preferred) or `mutool`; use `--preserve-svg always` to fail fast when SVG extraction is unavailable |
 | Figures become rasterized instead of vector | Keep source SVGs in `assets/`, avoid manual raster conversion, and ensure Calibre build runs with default pipeline options from `merge_and_build.py` (EPUB adds SVG-preserving flags) |
 

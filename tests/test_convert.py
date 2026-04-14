@@ -69,33 +69,26 @@ class MarkdownToHtmlTests(unittest.TestCase):
 class PdfEngineSelectionTests(unittest.TestCase):
     @mock.patch("convert.find_marker_single", return_value="/usr/bin/marker_single")
     @mock.patch("convert.detect_pdf_structure")
-    def test_auto_selects_marker_for_complex_pdf(self, detect_mock, _marker_mock):
-        detect_mock.return_value = convert.PdfHeuristicResult(
-            classification="complex",
-            indicators=["x"],
-            warnings=[],
-            pages=10,
-            page_width_pts=600.0,
-        )
+    def test_auto_prefers_marker_when_available(self, detect_mock, _marker_mock):
         engine, marker_cmd, pdf_type = convert.choose_pdf_engine("book.pdf", "auto")
         self.assertEqual(engine, "marker")
         self.assertEqual(marker_cmd, "/usr/bin/marker_single")
-        self.assertEqual(pdf_type, "complex")
+        self.assertEqual(pdf_type, "auto")
+        detect_mock.assert_not_called()
 
     @mock.patch("convert.find_marker_single", return_value=None)
+    @mock.patch("builtins.print")
     @mock.patch("convert.detect_pdf_structure")
-    def test_auto_falls_back_to_calibre_when_marker_missing(self, detect_mock, _marker_mock):
-        detect_mock.return_value = convert.PdfHeuristicResult(
-            classification="complex",
-            indicators=["x"],
-            warnings=[],
-            pages=5,
-            page_width_pts=612.0,
-        )
+    def test_auto_falls_back_to_calibre_when_marker_missing(self, detect_mock, print_mock, _marker_mock):
         engine, marker_cmd, pdf_type = convert.choose_pdf_engine("book.pdf", "auto")
         self.assertEqual(engine, "calibre")
         self.assertIsNone(marker_cmd)
-        self.assertEqual(pdf_type, "complex")
+        self.assertEqual(pdf_type, "auto")
+        detect_mock.assert_not_called()
+        print_mock.assert_any_call(
+            "Warning: marker-pdf non installé, utilisation de Calibre pour le PDF. "
+            "Installer marker-pdf est recommandé pour une meilleure extraction."
+        )
 
 
 class DetectPdfStructureTests(unittest.TestCase):
