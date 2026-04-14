@@ -17,6 +17,27 @@ _WORD_RE = re.compile(
     re.UNICODE,
 )
 
+_MIN_TERM_LEN = 3
+_PURE_NUMERIC_OR_PUNCT_RE = re.compile(r"^[\W\d_]+$", re.UNICODE)
+
+# Stopwords anglais (filtrage des unigrams triviaux et n-grammes entièrement fonctionnels).
+_EN_STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "ain", "all", "am", "an", "and",
+    "any", "are", "aren", "as", "at", "be", "because", "been", "before", "being", "below",
+    "between", "both", "but", "by", "can", "could", "couldn", "d", "did", "didn", "do",
+    "does", "doesn", "doing", "don", "down", "during", "each", "few", "for", "from", "further",
+    "had", "hadn", "has", "hasn", "have", "haven", "having", "he", "her", "here", "hers",
+    "herself", "him", "himself", "his", "how", "i", "if", "in", "into", "is", "isn", "it",
+    "its", "itself", "just", "ll", "m", "ma", "me", "might", "mightn", "more", "most", "must",
+    "mustn", "my", "myself", "needn", "no", "nor", "not", "now", "o", "of", "off", "on", "once",
+    "only", "or", "other", "our", "ours", "ourselves", "out", "over", "own", "re", "s", "same",
+    "shan", "she", "should", "shouldn", "so", "some", "such", "t", "than", "that", "the",
+    "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this", "those",
+    "through", "to", "too", "under", "until", "up", "ve", "very", "was", "wasn", "we", "were",
+    "weren", "what", "when", "where", "which", "while", "who", "whom", "why", "will", "with",
+    "won", "would", "wouldn", "y", "you", "your", "yours", "yourself", "yourselves",
+}
+
 
 def _words_normalized(text: str) -> List[str]:
     t = text.lower()
@@ -62,6 +83,57 @@ def _collect_ngram_frequencies(
             if n >= min_freq:
                 out[term] = max(out[term], n)
     return out
+
+
+def _is_pure_numeric_or_punct(term: str) -> bool:
+    return bool(_PURE_NUMERIC_OR_PUNCT_RE.match(term.strip()))
+
+
+def _is_broken_fragment_term(term: str, known_words: set[str]) -> bool:
+    tokens = term.split()
+    if len(tokens) < 2:
+        return False
+
+    # Alternative robuste et simple: un composant < 3 chars dans un n-gramme indique souvent
+    # un fragment OCR/PDF ("th e", "fi rst", etc.).
+    if any(len(tok) < _MIN_TERM_LEN for tok in tokens):
+        return True
+
+    # Détecte une coupure artificielle en 2 morceaux quand la version concaténée existe
+    # dans le corpus (ou stopwords), p.ex. "fi rst" -> "first".
+    for i in range(len(tokens) - 1):
+        left = tokens[i]
+        right = tokens[i + 1]
+        if not left.isalpha() or not right.isalpha():
+            continue
+        if not left.islower() or not right.islower():
+            continue
+        merged = left + right
+        if merged in known_words and (len(left) <= 3 or len(right) <= 3):
+            return True
+    return False
+
+
+def _passes_candidate_filters(term: str, known_words: set[str]) -> bool:
+    t = term.strip()
+    if len(t) < _MIN_TERM_LEN:
+        return False
+    if _is_pure_numeric_or_punct(t):
+        return False
+
+    tokens = t.split()
+    if not tokens:
+        return False
+
+    if len(tokens) == 1 and tokens[0].lower() in _EN_STOPWORDS:
+        return False
+
+    if len(tokens) >= 2 and all(tok.lower() in _EN_STOPWORDS for tok in tokens):
+        return False
+
+    if _is_broken_fragment_term(t, known_words):
+        return False
+    return True
 
 
 def _proper_noun_candidates(segments: Dict[str, str]) -> Counter:
@@ -113,10 +185,18 @@ def build_candidates(
     ngram_terms = _collect_ngram_frequencies(segments, min_freq)
     proper = _proper_noun_candidates(segments)
 
+    corpus_words: set[str] = set(_EN_STOPWORDS)
+    for text in segments.values():
+        corpus_words.update(_words_normalized(text))
+
     pairs: List[Tuple[str, int]] = []
     for term, freq in ngram_terms.items():
+        if not _passes_candidate_filters(term, corpus_words):
+            continue
         pairs.append((term, freq))
     for term, freq in proper.items():
+        if not _passes_candidate_filters(term, corpus_words):
+            continue
         pairs.append((term, freq))
 
     deduped = _dedupe_casefold(pairs)
